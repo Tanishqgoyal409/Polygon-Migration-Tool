@@ -1,69 +1,64 @@
-# Issues Analysis
+# Issues
 
 All file paths are inside the `PolygonMigration/` folder.
 
-## Product Issues
+## Product issues
 
-### 1. The tool says "success" even when tests or the checker are missing
+### 1. It says "success" even when tests or the checker are missing
 
-**Problem:**
-To copy a problem, the tool downloads each test from Polygon. If one download fails, the tool
-doesn't stop. It saves that test as empty and later skips it (`polygon_api.py:399-402`,
-`views.py:524`). At the end it still shows a "successfully" message.
+**Problem:** The tool downloads the tests from Polygon one by one. If one of them fails to
+download, it doesn't stop. It just saves that test as empty and skips it later
+(`polygon_api.py:399-402`). At the end the page still says everything went through
+successfully.
 
-The same happens with custom checkers (the program that decides if an answer is right). The
-checker usually fails to build, because a file it needs (`testlib.h`) is never downloaded. Then only
-its source file is uploaded, but the page says it was "compiled and uploaded" (`views.py:230-231`).
+The custom checker has the same problem. The tool tries to compile it, and if that fails it
+uploads the source file instead and only writes the error to the log. The page still says the
+checker was "compiled and uploaded" (`views.py:230-231`).
 
-**Impact:**
-A problem can go live with missing tests or a broken checker, and nobody knows. Wrong answers can
-get marked as correct.
+**Impact:** A problem can go live with missing tests or a checker that doesn't work, and nobody
+finds out. Wrong answers could end up being accepted.
 
-**Recommended improvement:**
-If a download fails, try again. If it still fails, stop and say which test failed. At the end, show
-a count like "12 of 12 tests uploaded", and say honestly whether the checker was built.
+**Recommended improvement:** Retry a download if it fails, and if it still doesn't work, stop and
+tell the user which test failed. At the end, show how many tests actually made it, and be honest
+about whether the checker compiled.
 
-**Priority rationale:**
-This is first because the tool's only job is to copy problems correctly. Here it fails and still
-says it worked.
+**Priority rationale:** Copying problems correctly is the whole point of the tool. This is the one
+place where it gets that wrong and still says it worked, so it comes first.
 
----
+### 2. Migrating a problem again leaves things in a bad state
 
-### 2. Migrating a problem again overwrites or deletes data
+**Problem:** Problems change on Polygon all the time, so they need to be migrated again. When that
+happens, a few things go wrong.
 
-**Problem:**
-When a problem changes on Polygon and is copied again:
+Tests that were removed on Polygon stay in the database. If a problem goes from 20 tests to 12,
+the extra 8 are never deleted (`views.py:530`). Old sample tests aren't cleaned up either.
 
-- **Hand-written content is erased.** The editorial and constraints are always replaced with blanks
-  (`views.py:350-351`). Staff write these by hand, so their work is lost.
-- **Removed tests stay behind.** If a problem goes from 20 tests to 12, old tests 13 to 20 are never
-  deleted from the database (`views.py:530`).
-- **All tests can disappear.** Old tests are deleted from S3 before the new ones are uploaded
-  (`polygon_api.py:750`). If the upload stops halfway, only some tests are left. If something fails
-  after the upload, the tool deletes all the new tests too (`views.py:557-562`).
+S3 can end up with only some of the tests, or none. The tool deletes the old files first and then
+uploads the new ones (`polygon_api.py:750`), so if the upload breaks in the middle, the problem is
+left half done. And if something fails after the upload, the tool deletes the new files too.
 
-**Impact:**
-After an update, a problem can have old tests, wrong tests or no tests at all, and its editorial
-can be gone. The page still says "success".
+The editorial and constraints also get cleared. The tool never fills these itself, so normally
+they're just empty. But staff can fill them in from the admin page
+(<http://127.0.0.1:8000/admin/> → Problems → open a problem → Content), and anything typed there is
+wiped the next time the problem is migrated (`views.py:350-351`).
 
-**Recommended improvement:**
-Only update what comes from Polygon, and never touch the editorial. Delete old tests properly.
-Upload the new tests to S3 first, and remove the old ones only after that works, so no data is lost.
+**Impact:** After an update, a problem can have old tests, wrong tests or no tests at all, and the
+page still says "success".
 
-**Priority rationale:**
-Second because it also loses data, but only when a problem is copied again. Issue 1 can happen
-every time.
+**Recommended improvement:** Only update what actually comes from Polygon, and leave the editorial
+and constraints alone. Delete tests that no longer exist. For S3, upload the new files first and
+only remove the old ones once that's done.
 
----
+**Priority rationale:** This also breaks data, but only when a problem is migrated again. Issue 1
+can happen on any migration, so this one is second.
 
 ### 3. Every button downloads the whole problem again
 
-**Problem:**
-All the buttons submit the same form to the same page, and every click also downloads the entire
-problem from Polygon again, even when the button only needs to do one small job
-(`views.py:234-329`). Pressing F5 afterwards repeats whatever you last clicked.
+**Problem:** Every button on the page downloads the full problem from Polygon again, even when it
+only needs to do one small thing (`views.py:234-329`). Refreshing the page after clicking a button
+also sends the same request again, so the whole thing runs twice.
 
-Times from the log for a problem with 12 tests:
+From our logs, for a problem with 12 tests:
 
 | Button | Time |
 |---|---|
@@ -72,177 +67,164 @@ Times from the log for a problem with 12 tests:
 | Save tests | 10 s |
 | Upload tests | 24 s |
 
-Each extra test adds about 1 second. Servers like gunicorn stop a request after 30 seconds by
-default, so Fetch would fail at around 20 tests, and Upload at around 17.
+Each extra test adds roughly another second. Most servers cut a request off after around 30
+seconds, so for bigger problems Fetch and Upload would just time out.
 
-**Impact:**
-Users wait on every click, and big problems can't be copied at all. If time runs out during an
-upload, the problem is left with only some of its tests.
+**Impact:** Users wait on every click, and big problems can't be migrated at all. If the time runs
+out in the middle of an upload, the problem is left with only some of its tests.
 
-**Recommended improvement:**
-Download the problem once and reuse it for the other buttons. Run big jobs in the background asynchronously and ensure reliability using retries.
+**Recommended improvement:** Give each button its own endpoint, like one for fetching, one for
+saving the problem, one for saving tests and one for uploading to S3, so each one only does its
+own job. Download the problem once and reuse it for the other buttons instead of fetching it again
+every time. The slow parts, like downloading and uploading tests, should run in the background so
+the page doesn't time out.
 
-**Priority rationale:**
-Third because it mostly wastes time, while issues 1 and 2 break data. It's still in the top three
-because it affects every user on every click.
+**Priority rationale:** This one mostly wastes time, while the first two break data. It's still in
+the top three because everyone runs into it on every click.
 
----
+## Code issues
 
-## Code Issues
+### 1. Passwords set from /admin are saved as plain text
 
-### 1. Passwords set from /admin are saved as plain text, and that user gets locked out
+**Problem:** Passwords should be hashed before they're saved. `createsuperuser` does that, but the
+admin page doesn't. It uses a plain admin page (`users/admin.py`) instead of Django's `UserAdmin`,
+so whatever you type as the password, like `MyPass@123`, is saved exactly like that.
 
-**Problem:**
-Passwords should be scrambled (hashed) before they are saved. `createsuperuser` does this. But the
-admin page (`/admin`) saves the password exactly as typed, like `MyPass@123`. This is because it
-uses a plain admin page (`users/admin.py:4-5`), not Django's safe `UserAdmin`.
+This causes a few problems. A user created from the admin page can never log in, because login
+expects a hashed password and gets "Invalid email or password". If you change someone's password
+from the admin page, even the superuser's, they get locked out, and there's no "forgot password"
+page to get back in. And anyone with access to the admin page or the database can read the
+passwords.
 
-So:
-- **A user created from `/admin` can never log in.** Login expects a scrambled password and finds
-  plain text, so it always says "Invalid email or password".
-- **Changing any password from `/admin` locks that person out.** This includes the superuser. There
-  is no "forgot password" page, so the only fix is running a command on the server.
-- **Passwords can be read.** Any admin can see them in `/admin`, and anyone with the database can
-  read them.
+There are also a couple of smaller login bugs. Just opening the login page logs you out
+(`users/views.py:9-10`). And emails are case sensitive, so `a@gmail.com` and `A@gmail.com` can be
+two different accounts, and typing your email with a capital letter in a different place won't
+work.
 
-Smaller bugs from the same hand-written login code:
-- Opening the login page logs you out (`users/views.py:9-10`).
-- **The same email can be two different users.** When a user is created, only the part after `@`
-  is made lowercase (`users/models.py:9`), and the admin page saves emails exactly as typed. Login
-  also needs the exact same capital letters (`users/backends.py:11`). So `a@gmail.com` and
-  `A@gmail.com` can be two separate accounts, and typing your email with a different capital letter
-  makes login fail.
+**Impact:** Admins can't add or manage users from the admin page without locking them out, and
+real passwords are exposed. Since people reuse passwords, their other accounts are at risk too.
 
-**Impact:**
-Admins can't add or manage users from `/admin` without locking them out. Real passwords are exposed,
-and people reuse passwords, so their other accounts can be at risk too.
+**Recommended improvement:** Use Django's `UserAdmin`, which hides the password and has a proper
+"change password" form. Reset any passwords that were set from the admin page. Save emails in
+lowercase, and only log people out when they click "Logout".
 
-**Recommended improvement:**
-- Use Django's `UserAdmin` for the admin page. It hides the password and gives a proper
-  "Change password" form: you type the new password twice, it checks that it's strong enough, and it
-  scrambles it before saving.
-- Reset every password that was already set from `/admin`.
-- Save every email in lowercase, and ignore capital letters when logging in.
-- Only log someone out when they click "Log out", not when they open the login page.
+**Priority rationale:** It's a security problem and it locks people out, and the fix is small
+because Django already has the safe version built in.
 
-**Priority rationale:**
-First because it's a big security hole and it locks people out. The fix is small, because Django
-already has the safe version.
+### 2. Everything is crammed into one class
 
----
+**Problem:** Almost all the work in this tool is done by a single class, `PolygonAPI`
+(`polygon_api.py`). Going by its name, it should only talk to Polygon. But it also manages the
+Redis cache, uploads files to S3 and compiles the custom checker. These are four separate jobs
+that have nothing to do with each other, and they're all mixed together in one big file. Because
+of that, some code is repeated inside it and some of it isn't used anywhere.
 
-### 2. One class does four different jobs
+**Impact:** The code is hard to read and hard to change. If something goes wrong with the S3
+upload, you have to dig through Polygon and cache code to find it. A small change in one part can
+break another part without you noticing, and since every button uses this class, any change to it
+is risky. It's also hard to test one part on its own.
 
-**Problem:**
-`PolygonAPI` (`polygon_api.py`) should only talk to Polygon. But it also manages the cache, uploads
-tests to s3 and builds the checker. Some of its code is copied (the cache setup 4 times, the checker
-upload twice), and some of it is never used.
+**Recommended improvement:** Give each job its own class: one that only talks to Polygon, one for
+the Redis cache, one for uploading to S3, and one for the checker. Each class does one thing, so
+it's easy to find, fix and test. While splitting it up, the repeated code can be merged and the
+unused code deleted.
 
-**Impact:**
-It's hard to know where to look when something breaks. A fix to the checker upload has to be made
-in two places. And since every flow uses this class, any change to it is risky.
+**Priority rationale:** Every part of the tool depends on this class, so it slows down every
+future change. It's below issue 1 because that one is a security problem and much quicker to fix.
 
-**Recommended improvement:**
-Split it into smaller parts, one per job: Polygon, cache, s3 and checker. Delete the code nobody
-uses.
+### 3. Two login checks do the same thing
 
-**Priority rationale:**
-Second, because every flow depends on this class, so it slows down every future change. It comes
-after issue 1 because issue 1 is a security hole and much quicker to fix.
+**Problem:** The project turns on two login backends (`settings.py:189-192`): its own
+`EmailBackend` and Django's `ModelBackend`. The user model already logs in with email, so
+`ModelBackend` can do everything `EmailBackend` does. When the password is wrong, the first one
+says no, and Django tries the second one, which checks the same password all over again.
 
----
+**Impact:** Every wrong password gets checked twice, which wastes time since password checks are
+slow on purpose. It can also give away which emails have an account, because a wrong password on
+a real account takes longer to fail than one on an email that doesn't exist.
 
-### 3. Two login checks do the same job
+**Recommended improvement:** Remove `EmailBackend` and just keep `ModelBackend`. Login keeps
+working the same way.
 
-**Problem:**
-The project turns on two login checks: its own `EmailBackend` and Django's built-in `ModelBackend`
-(`settings.py:189-191`). Both do the same thing: find the user by email and check the password.
-`EmailBackend` (`users/backends.py:4-15`) just repeats what `ModelBackend` already does. 
+**Priority rationale:** Login still works for real users, so it's third. But it's wasted work on
+every failed login, and the fix is just deleting one file and one line.
 
-When a password is wrong, `EmailBackend` says no, so Django tries `ModelBackend`, which checks the
-same password again.
-
-**Impact:**
-- **Every wrong password is checked twice.** Checking a password is slow on purpose, so this
-  doubles the time and server work for every failed login.
-- **It shows which emails have an account.** A wrong password on a real email takes about twice
-  as long as on an email that doesn't exist. Someone can use that difference to find out who has
-  an account.
-- It's extra code that does nothing useful, and it confuses anyone reading the login flow.
-
-**Recommended improvement:**
-Delete `EmailBackend` and keep only Django's `ModelBackend` in `settings.py`. Login keeps working
-the same way, since email is already the login field.
-
-**Priority rationale:**
-Third because login still works for real users. But it wastes server work on every failed login and
-leaks which emails exist, and the fix is just deleting one file and one line.
-
----
-
-## Edge Case Analysis
+## Edge case analysis
 
 ### Q1
 
-> A Polygon problem has 0 sample test cases but 15 regular test cases. What happens when you migrate this problem?
+> A Polygon problem has 0 sample test cases but 15 regular test cases. What happens when you
+> migrate this problem?
 
-It works with no warning, but students get no examples.
+It goes through fine with no warning, but students don't get any examples.
 
-None of the 15 tests is marked as an example (`polygon_api.py:376`), so no examples are saved
-(`views.py:439-463`). The page still says "success". Students see no example input or output, even
-if the statement says "in the first example...". All 15 tests still reach the judge, so judging
-works.
-
----
+None of the 15 tests are marked as samples, so no samples are saved and the page still says
+"success". Students won't see any example input or output, even if the statement talks about "the
+first example". All 15 tests still reach the judge, so judging itself works.
 
 ### Q2
 
-> A problem is migrated with 20 test cases. Later, the problem setter removes 8 test cases on Polygon (now 12 remain). The problem is re-migrated. What happens?
+> A problem is migrated with 20 test cases. Later, the problem setter removes 8 test cases on
+> Polygon (now 12 remain). The problem is re-migrated. What happens?
 
-The judge gets the right 12 tests as it fetches from the s3 and for updating in s3 we need to delete all the tests earlier saved and then new tests are saved so it will just has 12 tests and it will be the source of truth as db tests are truncated also, but the database keeps the 8 removed ones.
+The judge gets the right 12 tests, but the database still has all 20.
 
-The 12 new tests replace the first 12 old ones in order, and old tests 13 to 20 are never deleted
-(`views.py:530-538`). So the database shows 20 tests while the problem says 12. The upload deletes
-all the old files and uploads the 12 new ones (`polygon_api.py:750`), so the judge is fine. Every
-step says "success".
-
----
+In the database, the 12 new tests just overwrite the first 12 rows, and the other 8 are never
+deleted (`views.py:530-538`). So the database says 20 tests for a problem that only has 12. S3 is
+fine, because the upload clears out the old files before putting up the new 12. Every step still
+says "success".
 
 ### Q3
 
-> Two different Polygon problems have the exact same title: "Two Sum". You migrate the first one successfully. Then you try to migrate the second one. What happens?
+> Two different Polygon problems have the exact same title: "Two Sum". You migrate the first one
+> successfully. Then you try to migrate the second one. What happens?
 
-The second one fails to save. The first one is fine, because it has a constraint of unique over the slug.
+The first one is fine, but the second one fails to save.
 
-Each problem gets a short web name (slug) made from its title, so both become `two-sum`
-(`views.py:284`). Two problems can't share a slug (`models.py:58`), so the second one is rejected
-with a red "duplicate key" error. The tool has no way to change the slug, so the only fixes are
-renaming the problem on Polygon or editing the database by hand. The first problem is safe because
-problems are matched by their Polygon ID, not their title.
-
----
+Both titles turn into the same slug, `two-sum` (`views.py:284`), and two problems can't share a
+slug. So the second one fails with a "duplicate key" error. There's no way to change the slug from
+the tool, so the only options are renaming the problem on Polygon or fixing it directly in the
+database. The first problem isn't affected, because problems are matched by their Polygon ID, not
+their title.
 
 ### Q4
 
-> When test cases are saved to the database via "Migrate Test Cases to DB", some data is intentionally discarded. What data is lost? Why might this cause problems?
+> When test cases are saved to the database via "Migrate Test Cases to DB", some data is
+> intentionally discarded. What data is lost? Why might this cause problems?
 
-**Thrown away on purpose:**
-- Everything after the first 260 characters of each input and output (`views.py:526-527`).
-- Tests with an empty input or output. They are skipped completely (`views.py:524`).
+The database only keeps a short preview of each test. The full tests are only in S3.
 
-**Lost by accident:**
-- **Changes made by hand in `/admin`.** If someone edits a test's description, the next migration
-  writes over it (`views.py:533-537`).
-- **Tests that failed to download.** They become empty and get skipped too, with no warning.
+- **Tests are cut to 260 characters** (`views.py:526-527`). Anything longer is cut off, and
+  nothing shows that it was cut, so the saved test looks complete when it isn't.
+- **Failed downloads are lost.** A test that failed to download comes through empty and is
+  skipped without any warning, so the database ends up with fewer tests than the problem has.
+- **Edits from `/admin` are overwritten.** If someone fixes a test in the admin page, the next
+  migration replaces it with the Polygon version.
 
-**Why it matters:** most real tests are longer than 260 characters, so the saved copy is cut off,
-and nothing marks it as cut. The database ends up with fewer tests than the problem's test count
-says. And without the test number, you can't tell which Polygon test a row came from.
+## Other problems found
 
----
+Smaller issues, not ranked.
 
-## Notes
+### Starting the project
 
-- The project as given crashes on Fetch because one database update file (a migration) is missing.
-  I didn't rank it because one command (`makemigrations`) fixes it, and I've already done that.
-- Everything else I found is in `BUGS_FOUND.md`.
+- No migration for the `notes` and `genie_chat` columns, so Fetch crashed. Fixed with
+  `makemigrations`.
+- The Polygon key check runs when settings load, so `migrate` and `createsuperuser` crash without
+  Polygon keys, even though they don't need them.
+
+### Creating a user
+
+- `createsuperuser` accepts a username that's already taken, then crashes at the end and you lose
+  everything you typed.
+- Graduation year is optional but `createsuperuser` won't let you skip it.
+
+### Fetching a problem
+
+- "Main Correct Solution" can be a wrong-answer solution if none is marked as main.
+- Titles that aren't in English give an empty slug.
+- The statement preview shows raw HTML tags.
+
+### Saving the problem to the database
+
+- The statement is downloaded fresh but the samples come from the cache, so they can be from
+  different versions.
