@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Not for GitHub
+USER_FLOWS.md
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Logs and local data
+*.log
+*.sqlite3
+
+# Editor / tools
+.claude/
+.vscode/
