@@ -1,460 +1,410 @@
 # Documentation
 
+All file paths are inside the `PolygonMigration/` folder.
+
 ## 2.1 User Flows
 
-All file paths are inside the `PolygonMigration/` folder.
+The tool is a single page (`/`). Every button on it sends a form to the same view, `index` in
+`problems/views.py`. The view checks which hidden field came with the form to decide what to do.
 
 ### Flow 1: User login
 
-**Endpoint:** `/users/login/` → `login_view` in `users/views.py`
+**Endpoint:** `/users/login/` → `login_view` (`users/views.py:8-23`)
 
 #### 1. What the user clicks or submits
 
-The user opens `/`. If they are not logged in, they are redirected to `/users/login/`. They enter
-their email and password and click **Login**.
+The user opens `/`. If they aren't logged in, they're sent to `/users/login/`. They type their
+email and password and click **Login**.
 
 #### 2. What data the frontend sends to the backend
 
-A form POST to `/users/login/` with `email`, `password` and `csrfmiddlewaretoken` (a hidden
-security token).
+A POST with `email`, `password` and `csrfmiddlewaretoken` (a hidden token that stops fake form
+posts from other sites).
 
 #### 3. What the backend does, in order
 
-All of this happens in `login_view` (`users/views.py:8-23`) unless noted.
-
-1. Django checks the security token (CSRF middleware, `settings.py:48`). If it is wrong, it
-   returns 403.
-2. If the user is already logged in, they are logged out first (`users/views.py:9-10`). This
-   also happens when the page is only opened (GET).
-3. It calls `authenticate()` with the email and password (`users/views.py:14`). Two backends run
-   in order (`AUTHENTICATION_BACKENDS`, `settings.py:189-192`):
-   - `EmailBackend` (`users/backends.py:5-16`) finds the user by email and checks the password.
-   - If that fails, Django's `ModelBackend` repeats the same lookup and check. **This is an
-     issue:** the second backend adds nothing, so every wrong password is checked twice.
-4. If no user matches, the login page is shown again with an error (`users/views.py:21-23`).
-5. If the user is not staff, the login page is shown again with a different error
-   (`users/views.py:19-20`).
-6. If the user is staff, `login()` creates a session and redirects the user to `/`
-   (`users/views.py:16-18`). On the way out, Django's `SessionMiddleware` (`settings.py:46`)
-   saves the session and adds the `sessionid` cookie to the response headers.
+1. Django checks the CSRF token (`settings.py:49`). A bad token gets a 403 error.
+2. If someone is already logged in, they're logged out first. This happens even when the page is
+   only opened, not submitted (`users/views.py:9-10`).
+3. It checks the email and password with `authenticate()` (`users/views.py:14`). Two checkers run
+   one after the other (`settings.py:189-192`): the project's own `EmailBackend` and Django's
+   `ModelBackend`. Both do the same check, so a wrong password gets checked twice.
+4. No match: the login page is shown again with an error (`users/views.py:21-22`).
+5. Match, but not staff: the login page again, with a different error (`users/views.py:19-20`).
+6. Staff: `login()` starts a session and sends the user to `/` (`users/views.py:16-18`).
 
 #### 4. Which external APIs are called
 
 None. Login only uses the local database.
 
-#### 5. What is read or written
+#### 5. What is read or written in the database or storage
 
-- **Database** (PostgreSQL, `settings.py:73-85`):
-  - **WRITE**
-    - `users_user`: `last_login`
-    - `django_session`: a new session for the user (any old one is deleted)
-  - **READ**
-    - `users_user`: `email`, `password`, `is_active`, `is_staff` (`users/backends.py:11`)
-- **Cookie:** the browser receives `sessionid` in the response headers. It lasts 1 day
-  (`SESSION_COOKIE_AGE`, `settings.py:122`), and the browser sends it back on every later
-  request.
+- **Reads** `users_user`: `email`, `password`, `is_active`, `is_staff`.
+- **Writes** `users_user.last_login` and a new session row in `django_session`.
+- **Cookie:** the browser gets a `sessionid` cookie that lasts 1 day (`settings.py:123`).
 
-#### 6. What the user sees
+#### 6. What the user sees when the action completes
 
-- **Success:** a 302 redirect to the main page, which shows "Welcome, *name*".
-- **Wrong email or password:** the login page again, with "Invalid email or password."
-- **Not a staff account:** the login page again, with "You do not have staff access."
-
----
+- **Success:** the main page, with "Welcome, *first name last name*" at the top.
+- **Wrong email or password:** "Invalid email or password."
+- **Not staff:** "You do not have staff access."
 
 ### Flow 2: Fetching a problem from Polygon
 
-**Endpoint:** `POST /` → `index` in `problems/views.py`
+**Endpoint:** `POST /` → `index` (`problems/views.py:88-573`)
 
 #### 1. What the user clicks or submits
 
-The user types a Polygon problem ID on the main page and clicks **Fetch Problem**.
+Types a Polygon problem ID on the main page and clicks **Fetch Problem**.
 
 #### 2. What data the frontend sends to the backend
 
-A form POST to `/` with `problem_id` and `csrfmiddlewaretoken`. The page first shows a loading
-screen ("may take 3-4 minutes"), then sends the form 50 ms later.
+A POST with `problem_id` and the CSRF token. The page first shows a loading screen that says it
+"may take 3-4 minutes".
 
 #### 3. What the backend does, in order
 
-All of this happens in `index` (`views.py:89-573`). Polygon calls go through `PolygonAPI`
-(`polygon_api.py`).
-
-1. Checks that the user is logged-in staff (`views.py:88`), and loads all tags for the tag picker
+1. Checks the user is logged-in staff (`views.py:88`) and loads all tags for the tag picker
    (`views.py:110-122`).
 2. If the problem is already in the database, it loads its tags and difficulty and gets the main
-   solution from Polygon (`views.py:146-184`).
-   - **Issue:** if no solution is tagged as main (`MA`), it takes the first one in the list
-     (`views.py:171-173`). That can be a wrong solution, but it is still shown as "Main Correct
-     Solution".
-3. Gets the problem info: time and memory limits (`views.py:235`).
-4. Downloads the package ZIP, reads `problem.html` from it, then deletes the ZIP
-   (`polygon_api.py:129-241`). It takes the title, statement, input/output format and notes from
-   `problem.html` (`parse_problem_html`, `views.py:19-86`).
-5. Downloads every test: first the list of tests, then each test's input and answer
-   (`get_all_test_cases`, `polygon_api.py:351-407`). It saves them in Redis for 30 minutes
-   (`views.py:259`).
-   - **Issue:** a test that fails to download is saved as empty, with only a log warning
-     (`polygon_api.py:399-402`). The empty test is cached too, and the migrate actions later read
-     this cache and silently skip it (`views.py:447`, `:524`, `polygon_api.py:756`).
-6. Builds the details: title, slug and limits (`views.py:283-291`).
-   - **Issue:** `slugify(title)` (`views.py:284`) drops non-English letters, so a Russian or
-     Chinese title gives an empty slug.
-7. Gets the checker type (`views.py:292-306`) and the number of tests (`views.py:308`).
-8. Renders `index.html` with the result (`views.py:573`).
+   solution from Polygon (`views.py:146-184`). If no solution is marked as main, it just takes the
+   first one in the list (`views.py:171-173`). That could be a wrong solution, but the page still
+   calls it "Main Correct Solution".
+3. Gets the time and memory limits (`views.py:235`).
+4. Downloads the newest built package (a ZIP file), reads `problem.html` from it, and pulls out the
+   title, statement, input/output format and notes (`polygon_api.py:129-241`, `views.py:19-86`).
+   The ZIP is deleted afterwards. This is the last *built* package, so if someone edits the
+   statement on Polygon and doesn't build a new package, the tool shows the old statement.
+5. Downloads every test, input and answer, one by one (`polygon_api.py:351-407`), and keeps them
+   in Redis for 30 minutes (`views.py:259`). If a test fails to download, it's saved as empty and
+   only a warning goes to the log (`polygon_api.py:399-402`).
+6. Makes the slug (the short name used in the problem's URL) from the title (`views.py:284`).
+   Non-English letters are dropped, so a Russian or Chinese title gives an empty slug.
+7. Gets the checker type (`views.py:292-306`) and counts the tests (`views.py:308`).
+8. Shows the page (`views.py:573`).
 
-If anything fails, it shows the error and clears the Redis cache (`views.py:553-564`).
+If anything fails, the error is shown and the problem's Redis cache is cleared
+(`views.py:553-564`).
 
 #### 4. Which external APIs are called
 
-The **Polygon API**. Each call is signed with the API key and secret from `.env`
-(`polygon_api.py:35-114`). The calls run one after another, in this order:
+The Polygon API, one call after another:
 
-| # | Polygon method | Where in the code | Returns |
+| # | Polygon method | Where | Returns |
 |---|---|---|---|
 | 1 | `problem.updateWorkingCopy` | `views.py:160` | JSON (empty) |
 | 2 | `problem.solutions` | `views.py:162` | JSON list |
-| 3 | `problem.viewSolution` | `views.py:177` | plain text (solution code) |
-| 4 | `problem.info` | `views.py:235` → `get_problem_info` | JSON |
-| 5 | `problem.info` ⚠ repeat of 4 | `views.py:239` → `download_and_extract_package` (`polygon_api.py:150`) | JSON |
-| 6 | `problem.packages` | same function (`polygon_api.py:155`) | JSON list |
-| 7 | `problem.package` | same function (`polygon_api.py:187`) | ZIP file |
-| 8 | `problem.tests` | `views.py:256` → `get_all_test_cases` (`polygon_api.py:364`) | JSON list |
-| – | `problem.testInput` + `problem.testAnswer`, for each test | same function (`polygon_api.py:383`, `:390`) | plain text |
+| 3 | `problem.viewSolution` | `views.py:177` | plain text (code) |
+| 4 | `problem.info` | `views.py:235` | JSON |
+| 5 | `problem.info` (repeat of 4) | `polygon_api.py:150` | JSON |
+| 6 | `problem.packages` | `polygon_api.py:155` | JSON list |
+| 7 | `problem.package` | `polygon_api.py:187` | ZIP file |
+| 8 | `problem.tests` | `polygon_api.py:364` | JSON list |
+| – | `problem.testInput` and `problem.testAnswer`, for each test | `polygon_api.py:383`, `:390` | plain text |
 | 9 | `problem.checker` | `views.py:292` | JSON |
-| 10 | `problem.checker` ⚠ repeat of 9 | `views.py:306` → `get_custom_checker_info` (`polygon_api.py:421`) | JSON |
-| 11 | `problem.tests` ⚠ repeat of 8 | `views.py:308` → `get_test_cases` (`polygon_api.py:304`), only to count them | JSON list |
+| 10 | `problem.checker` (repeat of 9) | `polygon_api.py:421` | JSON |
+| 11 | `problem.tests` (repeat of 8, only to count) | `polygon_api.py:304` | JSON list |
 
-Calls 1–3 run only if the problem is already in the database.
+Calls 1 to 3 only run if the problem is already in the database. So the total is 11 calls plus 2
+per test, or 8 plus 2 per test for a new problem. Calls 5, 10 and 11 ask for data the code
+already has.
 
-**Total:** 11 calls + 2 per test case, or 8 + 2 per test case for a new problem.
-- **Issue:** calls 5, 10 and 11 fetch data the code already has.
+#### 5. What is read or written in the database or storage
 
-Removing these repeats saves time and API calls.
+- **Database:** nothing is written. It reads all tags, and the problem and its tags if it exists.
+- **Redis:** each test is saved under `polygon_migration_test_cases_<id>_...` for 30 minutes
+  (`polygon_api.py:799-844`).
 
-#### 5. What is read or written
+#### 6. What the user sees when the action completes
 
-- **Database:**
-  - **WRITE**
-    - nothing
-  - **READ**
-    - `users_user`: `is_staff`, `first_name`, `last_name` of the logged-in user
-    - `problems_problemtag`: `tag_name` of all tags, for the tag picker (`views.py:110`)
-    - `problems_problem`: `id`, `slug`, `difficulty`, if the problem exists (`views.py:146`)
-    - `problems_problem_extra_tags`: the problem's tags (`views.py:152`)
-- **Redis:** saves each test under `polygon_migration_test_cases_<id>_...` for 30 minutes
-  (`polygon_api.py:799-844`). These keys are deleted in case of transaction rollback.
-  (`polygon_api.py:901-934`).
-
-#### 6. What the user sees
-
-The page reloads and shows the problem:
+The page reloads and shows:
 
 - the title, slug, limits, checker and number of tests;
-- the statement, input/output format and notes;
+- the statement, input/output format and notes. These show up as raw HTML code (with the `<p>`
+  tags visible), because the page escapes them (`index.html:207`);
 - a table of all tests, showing the first 50 characters of each;
 - the main solution, only if the problem is already in the database.
 
-Below that are the buttons for the next steps. The two test-case buttons stay disabled until the
-problem is saved to the database.
-
----
+The two test buttons stay disabled until the problem is saved to the database.
 
 ### Flow 3: Migrating a problem to the database
 
-**Endpoint:** `POST /` → `index` in `problems/views.py` (the same view as the fetch)
+**Endpoint:** `POST /` → `index` (`problems/views.py`), the same view as the fetch
 
 #### 1. What the user clicks or submits
 
-After a fetch, the user picks a difficulty and tags, and clicks **Create/Update problem in Database**.
+After a fetch, picks a difficulty and tags, and clicks **Create/Update problem in Database**.
 
 #### 2. What data the frontend sends to the backend
 
-A normal form POST to `/` (`index.html:237-248`) with:
+A POST (`index.html:237-248`) with `problem_id`, `migrate_to_db=1`, `difficulty`, one `tags`
+field per tag, and the CSRF token. If no difficulty is picked, the browser shows an alert and
+sends nothing (`index.html:404-414`).
 
-- `problem_id`
-- `migrate_to_db=1`
-- `difficulty`
-- one `tags` field per selected tag
-- `csrfmiddlewaretoken`
-
-Before sending, the page checks that a difficulty is picked and shows an alert if not. It then
-shows the "Migrating to database..." loading screen (`index.html:404-414`). The browser loads a whole new page.
-
-- **Issue:** the backend reads a `new_tag` field that the form never sends (`views.py:131`,
-  `:411-418`).
+The server also reads a `new_tag` field (`views.py:131`), but the page never sends one.
 
 #### 3. What the backend does, in order
 
-1. **Runs the whole fetch again** (Flow 2, steps 1–8, `views.py:146-329`). The only difference is
-   that the tests are read from the Redis cache instead of Polygon (`views.py:247-254`).
-   - **Issue:** everything the user just reviewed is downloaded again, which adds 9–12 Polygon calls (see point 4).
-2. Checks that a difficulty was sent (`views.py:334`).
-   - **Issue:** this check only runs after all the Polygon calls.
-3. Creates the problem, or updates it if it already exists (`views.py:340-388`).
-4. Replaces the problem's tags with the selected ones, creating any new tags
-   (`views.py:396-418`).
-5. Reads the tests from Redis again (`views.py:426`) and saves the samples (`views.py:439-463`).
-   - **Issue (High):** the statement was just downloaded again, but the samples come from the cache made at fetch time. If the problem changed on Polygon in between, the two don't match.
-   - **Issue (High):** old samples are never deleted. If a problem goes from 3 samples to 2, the third one stays.
+1. **Runs the whole fetch again** (Flow 2), except the tests come from Redis
+   (`views.py:146-329`, `:247-254`). That's 9 to 12 Polygon calls for things the user has
+   already seen.
+2. Checks a difficulty was sent (`views.py:334`). This only happens after all those calls.
+3. Creates the problem, or updates it if the Polygon ID is already in the database
+   (`views.py:340-388`). On an update, the slug is rebuilt from the title (`views.py:345`).
+   `constraints` and `editorial` are always saved as empty, because the tool never fills them
+   (`views.py:288-289`). The only way to fill them is from the admin page,
+   <http://127.0.0.1:8000/admin/> → **Problems** → open a problem → **Content** section
+   (`problems/admin.py:31`). If they were filled in there, a re-migration empties them again
+   (`views.py:350-351`). If they were never filled in, nothing is lost.
+4. Removes the problem's old tags and adds the selected ones, creating any new tags
+   (`views.py:396-408`).
+5. Saves the sample tests from Redis (`views.py:426-463`). Old samples are never deleted, so if a
+   problem goes from 3 samples to 2, the 3rd one stays.
 6. Gets the main solution from Polygon again (`views.py:470-495`).
-7. Renders the whole `index.html` again (`views.py:573`).
+7. Shows the page.
 
-All the database changes run in one transaction (`views.py:187`), so if anything fails, none of
-them are kept. The error is shown and the Redis cache is cleared (`views.py:553-564`).
-
-- **Issue:** a missing difficulty is shown as "Migration failed and all changes have been rolled
-  back" (`views.py:555`).
+All database changes happen in one transaction (`views.py:187`), so if anything fails, none of
+them are kept. The error always says "Migration failed and all changes have been rolled back",
+even for something simple like a missing difficulty (`views.py:555`).
 
 #### 4. Which external APIs are called
 
-The **Polygon API**. It makes the same calls as the fetch, except the test downloads, which come
-from Redis:
+The same calls as the fetch, minus the test downloads, plus the solution calls again:
 
-| # | Polygon method | Where in the code | Returns |
+| # | Polygon method | Where | Returns |
 |---|---|---|---|
-| 1–3 | `problem.updateWorkingCopy`, `problem.solutions`, `problem.viewSolution` ⚠ repeat of fetch | `views.py:160-177` | JSON, JSON list, plain text |
-| 4–5 | `problem.info` twice ⚠ | `views.py:235`, `polygon_api.py:150` | JSON |
-| 6–7 | `problem.packages`, `problem.package` ⚠ same ZIP as the fetch | `polygon_api.py:155`, `:187` | JSON list, ZIP |
-| 8–9 | `problem.checker` twice ⚠ | `views.py:292`, `polygon_api.py:421` | JSON |
-| 10 | `problem.tests` ⚠ only to count them | `polygon_api.py:304` | JSON list |
-| 11–12 | `problem.solutions`, `problem.viewSolution` ⚠ repeat of 2–3 | `views.py:473`, `:488` | JSON list, plain text |
+| 1–3 | `updateWorkingCopy`, `solutions`, `viewSolution` | `views.py:160-177` | JSON, JSON list, text |
+| 4–5 | `problem.info` twice | `views.py:235`, `polygon_api.py:150` | JSON |
+| 6–7 | `problem.packages`, `problem.package` | `polygon_api.py:155`, `:187` | JSON list, ZIP |
+| 8–9 | `problem.checker` twice | `views.py:292`, `polygon_api.py:421` | JSON |
+| 10 | `problem.tests` (only to count) | `polygon_api.py:304` | JSON list |
+| 11–12 | `solutions`, `viewSolution` again | `views.py:473`, `:488` | JSON list, text |
 
-Calls 1–3 run only if the problem is already in the database.
+That's 12 calls, or 9 for a new problem. If the Redis cache has expired, add 1 plus 2 per test.
 
-**Total:** 12 calls, or 9 for a new problem. If the Redis cache has expired, add 1 + 2 per test case.
+#### 5. What is read or written in the database or storage
 
-#### 5. What is read or written
+- **Writes:**
+  - `problems_problem`: title, slug, difficulty, statement, input/output format, notes, limits,
+    checker type, test count, and empty constraints and editorial (`views.py:340-388`)
+  - `problems_problemtag`: any new tag (`views.py:403`)
+  - `problems_problem_extra_tags`: old tag links removed, new ones added (`views.py:396-404`)
+  - `problems_sampletestcase`: input, output and order of each sample (`views.py:449-462`)
+- **Reads:** the same as Flow 2, plus the problem's existing samples (`views.py:441`).
+- **Redis:** the tests are read twice (`views.py:248`, `:426`).
 
-- **Database:**
-  - **WRITE**
-    - `problems_problem`: `polygon_id`, `title`, `slug`, `difficulty`, `problem_statement`,
-      `input_format`, `output_format`, `notes`, `time_limit`, `memory_limit`, `checker_type`,
-      `test_case_count` (`views.py:340-388`)
-    - `problems_problemtag`: `tag_name` of any new tag (`views.py:403`)
-    - `problems_problem_extra_tags`: old tag links removed, selected tags linked
-      (`views.py:396-404`)
-    - `problems_sampletestcase`: `input`, `output`, `order` of each sample (`views.py:449-462`)
-  - **READ**
-    - the same as Flow 2
-    - `problems_sampletestcase`: the problem's existing samples (`views.py:441`)
-- **Redis:** the tests are read twice (`views.py:248`, `:426`). All keys are cleared if the transaction fails. (`views.py:564`).
+#### 6. What the user sees when the action completes
 
-#### 6. What the user sees
-
-- **No difficulty picked:** a browser alert; nothing is sent.
-- **Success:** the page reloads with a blue box, "Problem '*title*' created in database
-  successfully." (or "updated"). It also shows the database ID, the Algopath link and the main
-  solution, and the two test-case buttons are now enabled.
+- **No difficulty picked:** a browser alert, and nothing is sent.
+- **Success:** a blue box, "Problem '*title*' created in database successfully." (or "updated").
+  The page also shows the database ID, the Algopath link (built from the slug) and the main
+  solution. The two test buttons are now enabled.
 - **Failure:** a red box, "Migration failed and all changes have been rolled back. Reason: ..."
-
----
 
 ### Flow 4: Migrating test cases to the database
 
-**Endpoint:** `POST /` → `index` in `problems/views.py` (the same view as the fetch)
+**Endpoint:** `POST /` → `index` (`problems/views.py`), the same view as the fetch
 
 #### 1. What the user clicks or submits
 
-After the problem is saved to the database, the user clicks **Migrate Test Description to
-Database** below the test table. Until then the button is disabled.
+Clicks **Migrate Test Description to Database** under the test table. The button is disabled
+until the problem is in the database.
 
 #### 2. What data the frontend sends to the backend
 
-A form POST to `/` with `problem_id`, `migrate_test_cases_to_db=1` and `csrfmiddlewaretoken`
-(`index.html:310-315`). A loading screen shows, and then the whole page reloads.
+A POST with `problem_id`, `migrate_test_cases_to_db=1` and the CSRF token
+(`index.html:310-315`).
 
 #### 3. What the backend does, in order
 
-1. Runs the whole fetch again (Flow 2), but takes the tests from Redis (`views.py:146-329`).
-   - **Issue:** this makes 10 Polygon calls that this button doesn't need.
-2. Checks that the problem is in the database (`views.py:498`).
-   - **Issue:** this check only runs after all the Polygon calls.
-3. Reads the tests from Redis again (`views.py:505`). If the cache has expired, it downloads them
-   from Polygon again (`polygon_api.py:351`).
-4. Saves each test to the database, keeping only the first 260 characters of the input and the
-   output (`views.py:516-549`). Empty tests are skipped.
-   - **Issue:** this has the same problems as saving the samples in Flow 3:
-     - old rows are never deleted;
-     - the tests come from a cache that can be 30 minutes old.
-   - **Issue:** a test that failed to download in Flow 2 was cached as empty, so it is skipped
-     here with no warning.
-5. Renders `index.html` again with a success message (`views.py:550`, `:573`).
-
-If anything fails, nothing is saved and the Redis cache is cleared (`views.py:553-564`).
+1. Runs the whole fetch again, with the tests from Redis (`views.py:146-329`). That's 10 Polygon
+   calls this button doesn't need.
+2. Checks the problem is in the database (`views.py:498`), again only after those calls.
+3. Reads the tests from Redis (`views.py:505`), or downloads them again if the cache expired.
+4. Saves each test, keeping only the first 260 characters of the input and the answer
+   (`views.py:516-549`). Empty tests are skipped. Existing rows are updated by position, and
+   extra old rows are never deleted.
+5. Shows the page.
 
 #### 4. Which external APIs are called
 
-The **Polygon API**: the same calls as Flow 3, without the last two solution calls. That makes
-**10 calls**, and all of them repeat the fetch (`views.py:160-308`). If the cache has expired, add
-1 + 2 per test case.
+10 Polygon calls, all repeats of the fetch (`views.py:160-308`). If the cache has expired, add 1
+plus 2 per test.
 
-#### 5. What is read or written
+#### 5. What is read or written in the database or storage
 
-- **Database:**
-  - **WRITE**
-    - `problems_problemtestcase`: `input`, `output`, `is_sample`, `description`, `order` of each
-      test (`views.py:530-548`)
-  - **READ**
-    - the same as Flow 2
-    - `problems_problemtestcase`: the problem's existing tests (`views.py:516`)
-- **Redis:** reads the tests (`views.py:505`). The cache is cleared if the migration fails
-  (`views.py:564`).
+- **Writes** `problems_problemtestcase`: input, output, `is_sample`, description and order of each
+  test (`views.py:530-548`).
+- **Reads** the same as Flow 2, plus the problem's existing tests (`views.py:516`).
+- **Redis:** reads the tests (`views.py:505`).
 
-#### 6. What the user sees
+#### 6. What the user sees when the action completes
 
-The page reloads with a green box: "Test cases description migrated to database Successfully."
----
+A green box: "Test cases description migrated to database Successfully."
 
 ### Flow 5: Uploading test cases to cloud storage
 
-**Endpoint:** `POST /` → `index` in `problems/views.py` (the same view as the fetch)
+**Endpoint:** `POST /` → `index` (`problems/views.py`), the same view as the fetch
+
+We store tests in AWS S3, so `.env` has `STORAGE_PROVIDER=s3`. The code and the page still use
+the word "Azure" in a few places (the button, the form field, the messages) because the tool was
+first written for Azure. Those are just old names. With `STORAGE_PROVIDER=s3`, every file goes to
+S3.
 
 #### 1. What the user clicks or submits
 
-After the problem is saved to the database, the user clicks **Migrate Test Cases to Azure**. Until
-then the button is disabled.
+Clicks the button labelled **Migrate Test Cases to Azure**. It's disabled until the problem is in
+the database.
 
 #### 2. What data the frontend sends to the backend
 
-A form POST to `/` with `problem_id`, `migrate_to_azure=1` and `csrfmiddlewaretoken`
-(`index.html:250-255`). A loading screen shows, and then the whole page reloads.
+A POST with `problem_id`, `migrate_to_azure=1` and the CSRF token (`index.html:250-255`). The page
+shows a "Migrating to Azure..." loading screen.
 
 #### 3. What the backend does, in order
 
-1. Gets the main solution from Polygon, as in the fetch (`views.py:149-184`).
-2. Checks that the problem is in the database (`views.py:193-197`). If it isn't, it shows an error and stops.
-3. Tries to clear the judge's Redis cache for this problem (keys `oj_dev_..._<db id>*`,
-   `views.py:208` → `polygon_api.py:771-797`).
-   - **Issue:** nothing in this codebase ever writes these keys. They belong to a separate judge
-     service, so here nothing is deleted.
-4. Uploads the tests (`views.py:218` → `migrate_to_storage`, `polygon_api.py:708-769`):
-   - reads the tests from Redis, or from Polygon if the cache has expired;
-   - picks S3 or Azure from `STORAGE_PROVIDER` in `.env` (`storage.py:4-26`);
-   - deletes all of the problem's old files (`polygon_api.py:750`);
-   - uploads each test as `01` (input) and `01.a` (answer) (`S3Testcase.py:28-35` or
-     `AzureTestcase.py:60-86`).
+1. Gets the main solution from Polygon (`views.py:149-184`).
+2. Checks the problem is in the database (`views.py:193-197`). If not, it shows an error and
+   stops.
+3. Deletes the Redis keys `oj_dev_with_redis_storage_test_cases_<db id>*` (`views.py:208` →
+   `polygon_api.py:771-797`). Nothing in this project writes these keys. They belong to the
+   judge.
+4. Uploads the tests to S3 (`views.py:218` → `migrate_to_storage`, `polygon_api.py:708-769`):
+   - reads the tests from Redis, or from Polygon if the cache expired (`polygon_api.py:731-737`);
+   - `get_storage()` sees `STORAGE_PROVIDER=s3` and creates an `S3BlobManager` with the AWS keys
+     from `.env` (`storage.py:8-14`, `S3Testcase.py:11-20`);
+   - deletes every file under `test_cases/<db id>/` in the bucket (`polygon_api.py:750` →
+     `empty_blob`, `S3Testcase.py:37-46`). It lists the files and deletes them in batches;
+   - uploads each test as two files, `01` (input) and `01.a` (answer), one `put_object` call each
+     (`S3Testcase.py:28-35`). Empty tests are skipped. If an upload fails, the error stops the
+     whole upload (`S3Testcase.py:33-35`).
+5. If the problem has a custom checker, tries to compile it with `g++` on this server and upload
+   it to the same folder (`polygon_api.py:767` → `:570-706`). If compiling fails, it uploads the
+   `.cpp` source instead. Checker errors only go to the log.
+6. Runs the whole fetch again (`views.py:234-329`) and shows the page.
 
-   Because the old files are deleted first, an upload that fails halfway leaves only some tests, and it raise an error.
+What happens when something fails:
 
-5. If the problem has a custom checker (`views.py:211`), compiles it with `g++` on this server and
-   uploads it (`polygon_api.py:767` → `:570-706`).
-   - On Windows it is uploaded as `custom_checker.exe`.
-   - Checker errors are only logged.
-6. Runs the whole fetch again (Flow 2, `views.py:234-329`) and renders `index.html`
-   (`views.py:573`).
-
-If anything fails after the upload, all of the problem's files in storage are deleted
-(`views.py:557-562`). The old files were already deleted in step 4, so this wipes the problem's
-tests from S3 completely.
+- **An upload to S3 fails:** the error is shown. The old files are already deleted and the files
+  uploaded before the error stay, so the problem is left with only some tests in S3.
+- **Something fails after the upload** (for example the fetch in step 6): the tool deletes all of
+  the problem's files in S3 (`views.py:557-562`). The old files were already deleted in step 4, so
+  the problem is left with no tests at all.
 
 #### 4. Which external APIs are called
 
-- **Polygon API:** **12 calls**:
-  - the 3 solution calls (`views.py:160-177`);
-  - `problem.checker` twice before the upload (`views.py:211`, `polygon_api.py:588`);
-  - the 7 fetch calls again (`views.py:235-308`).
+- **Polygon:** 12 calls. The 3 solution calls, `problem.checker` twice before the upload
+  (`views.py:211`, `polygon_api.py:588`), then the 7 fetch calls again. So `problem.checker` runs
+  4 times in one click. A custom checker adds 1 to 3 `problem.viewFile` calls, and an expired
+  cache adds 1 plus 2 per test.
+- **AWS S3** (through `boto3`):
+  - `ListObjectsV2` to find the old files, and `DeleteObjects` to delete them
+    (`S3Testcase.py:40-44`);
+  - `PutObject` twice per test (input and answer), plus once for the checker
+    (`S3Testcase.py:25`).
 
-  That means `problem.checker` runs 4 times in one click. A custom checker adds 1–3
-  `problem.viewFile` calls. An expired cache adds 1 call, plus 2 per test.
-- **S3 or Azure:** one delete of the old files, then 2 uploads per test, plus one for the checker.
+#### 5. What is read or written in the database or storage
 
-#### 5. What is read or written
-
-- **Database:**
-  - **WRITE**
-    - nothing
-  - **READ**
-    - the same as Flow 2
-    - `problems_problem`: `id`, used to name the storage folder (`views.py:193`)
+- **Database:** nothing written. Reads the problem's `id`, which names the S3 folder
+  (`views.py:193`).
 - **Redis:** deletes the judge's `oj_dev_...` keys and reads the cached tests
   (`polygon_api.py:792-794`, `:731`).
-- **Cloud storage:** replaces everything under `test_cases/<db id>/`.
+- **S3:** replaces everything under `test_cases/<db id>/` in the bucket.
 
-#### 6. What the user sees
+#### 6. What the user sees when the action completes
 
-The page reloads with "Test cases migrated to Azure Blob Storage successfully." The message says
-Azure even when the files go to S3. If the S3 upload fails, only the red error box is shown. 
+A green box: "Test cases migrated to Azure Blob Storage successfully." It says Azure, but the
+files are in S3. With a custom checker it adds "was also compiled and uploaded", even if only the
+source was uploaded. If anything fails, a red box: "Migration failed and all changes have been
+rolled back. Reason: ..."
 
+## 2.2 Polygon API and cloud storage
 
----
+### Polygon endpoints used
 
-## 2.2 Polygon API and Cloud Storage
+Every call is a POST to `https://polygon.codeforces.com/api/<method>` (`polygon_api.py:26`).
 
-### Polygon API endpoints
-
-All calls go to `https://polygon.codeforces.com/api/<method>` as a POST (`polygon_api.py:26`).
-
-| Endpoint | What it is used for | Where |
+| Endpoint | Used for | Where |
 |---|---|---|
 | `problem.info` | time and memory limits | `polygon_api.py:254` |
 | `problem.packages` | list of built packages, to find the newest | `polygon_api.py:155` |
 | `problem.package` | download the package ZIP, to read `problem.html` | `polygon_api.py:172-187` |
-| `problem.tests` | list of tests (index, sample flag, description) | `polygon_api.py:304`, `:364` |
-| `problem.testInput` | one test's input (plain text) | `polygon_api.py:383` |
-| `problem.testAnswer` | one test's answer (plain text) | `polygon_api.py:390` |
+| `problem.tests` | list of tests (number, sample or not, description) | `polygon_api.py:304`, `:364` |
+| `problem.testInput` | one test's input | `polygon_api.py:383` |
+| `problem.testAnswer` | one test's answer | `polygon_api.py:390` |
 | `problem.checker` | checker name, standard (`std::...`) or custom | `views.py:292`, `polygon_api.py:421` |
-| `problem.viewFile` | source of a custom checker | `polygon_api.py:452-479` |
+| `problem.viewFile` | source code of a custom checker | `polygon_api.py:452-479` |
 | `problem.solutions` | list of solutions, to find the main one | `views.py:162`, `:473` |
 | `problem.viewSolution` | code of the main solution | `views.py:177`, `:488` |
 | `problem.updateWorkingCopy` | called before reading solutions | `views.py:160` |
 
-`problem.statements`, `problem.script` and `problem.files` also have helper functions
-(`polygon_api.py:258-349`), but nothing calls them.
+There are also helpers for `problem.statements`, `problem.script`, `problem.files` and
+`problem.viewFile` (`polygon_api.py:258-349`), but nothing calls them.
 
-### How requests are authenticated
+### How requests are signed
 
-Polygon uses an API key and secret, read from `.env` (`POLYGON_API_KEY`, `POLYGON_API_SECRET`). The
-app won't start without them (`settings.py:125-129`). Every request is signed in
+Polygon needs an API key and secret, read from `.env` (`POLYGON_API_KEY`, `POLYGON_API_SECRET`).
+The app won't start without them (`settings.py:125-129`). Every request is signed in
 `_generate_api_sig` (`polygon_api.py:35-68`):
 
-1. Adds `apiKey` and the current `time` (Unix seconds) to the request parameters.
-2. Sorts all parameters by name and joins them as `name=value&...`.
-3. Builds the string to hash: `<6 random chars>/<method>?<params>#<secret>` (`to_hash`,
-   `polygon_api.py:60`).
-4. Hashes `to_hash` with SHA-512. `apiSig` is the 6 random chars followed by the hash
-   (`polygon_api.py:63-65`).
+1. Add `apiKey` and `time` (the current Unix time) to the parameters.
+2. Sort the parameters by name and join them as `name=value&...`.
+3. Build the text `<6 random chars>/<method>?<params>#<secret>`.
+4. Hash it with SHA-512. `apiSig` is the 6 random chars followed by the hash.
 
-The request is then sent with `apiKey`, `time`, `apiSig` and the normal parameters as form fields
+The request then sends `apiKey`, `time`, `apiSig` and the normal parameters as form fields
 (`polygon_api.py:88-96`). The secret itself is never sent.
 
 Polygon replies with JSON `{status, result, comment}`. If `status` is `FAILED`, the code raises an
 error with the comment (`polygon_api.py:105-106`). Tests, solutions and files come back as plain
-text, and the ZIP as raw bytes.
+text, and the package as ZIP bytes. No timeout is set on these requests (`polygon_api.py:96`,
+`:187`), so if Polygon hangs, the page hangs too.
 
-No timeout is set on the requests, so a slow Polygon response keeps the page waiting.
+### S3 storage
 
-### Cloud storage: how files are named and organized
+We use AWS S3. The code can also talk to Azure, and `STORAGE_PROVIDER` in `.env` picks which
+one (`storage.py:4-25`). We set it to `s3`. This matters: if it's missing, the code falls back to
+Azure (`storage.py:6`).
 
-The app uses **AWS S3**. With `STORAGE_PROVIDER=s3` in `.env`, `get_storage()` (`storage.py:8-14`)
-creates an `S3BlobManager` (`S3Testcase.py`):
+With `s3`, `get_storage()` creates an `S3BlobManager` (`S3Testcase.py`). It needs these in
+`.env`:
 
-- **Login:** a `boto3` S3 client with `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION`
-  (`S3Testcase.py:14-19`).
-- **Bucket:** `AWS_S3_BUCKET_NAME`, here `polygon-testcases-puzzled`.
+| Variable | What it is |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | AWS access key |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key |
+| `AWS_REGION` | the bucket's region |
+| `AWS_S3_BUCKET_NAME` | the bucket, `polygon-testcases-puzzled` in our setup |
 
-Each problem gets one folder, named by its **database ID**, not its Polygon ID:
+If any of the first three is missing, the upload fails straight away with an error
+(`S3Testcase.py:12-13`).
 
-```
+Each problem gets one folder, named after its database ID, not its Polygon ID:
+
+```text
 s3://polygon-testcases-puzzled/
 └── test_cases/
-    └── <db problem id>/           e.g. test_cases/1/
-        ├── 01                     input of test 1
-        ├── 01.a                   answer of test 1
+    └── <db problem id>/        e.g. test_cases/1/
+        ├── 01                  input of test 1
+        ├── 01.a                answer of test 1
         ├── 02
         ├── 02.a
         ├── ...
-        └── custom_checker.cpp     only if the problem has a custom checker
+        └── custom_checker.cpp  only if the problem has a custom checker
 ```
 
-- **Test files:** the number is the test's position in the list, padded to 2 digits
-  (`S3Testcase.py:29`). The input has no extension, and the answer ends in `.a`. A skipped empty
-  test leaves a gap in the numbers. 
-- **Custom checker:** the code tries to compile it, but `testlib.h` is never downloaded, so the
-  source is uploaded as `custom_checker.cpp` (`polygon_api.py:668`).
-- **Contents:** each input and answer is saved as its own plain-text file in the bucket (S3Testcase.py:22-26).
-- **Updating:** before each upload, every file under `test_cases/<db problem id>/` is deleted
-  (`empty_blob`, `S3Testcase.py:37-46`), then the files are uploaded again.
-- **Errors:** an upload error is raised and shown on the page (`S3Testcase.py:33-35`), but the files uploaded before it stay in the bucket.
-
-The folder is named after the database ID. If a problem is deleted from the database and migrated again, it gets a new ID and a new folder, and the old folder is never deleted from the bucket.
+- **Test files** are numbered by their position in the list, with 2 digits
+  (`S3Testcase.py:29`). The input has no extension and the answer ends in `.a`. A skipped empty
+  test leaves a gap, like `01`, `03`.
+- **Custom checker:** if it compiles, the binary is uploaded as `custom_checker` (or
+  `custom_checker.exe` on Windows). If it doesn't compile, the source is uploaded as
+  `custom_checker.cpp` instead (`polygon_api.py:668`).
+- **Contents:** each file is plain text, uploaded with `put_object` (`S3Testcase.py:22-26`).
+- **Updating:** everything in the folder is deleted first (`S3Testcase.py:37-46`), then the new
+  files are uploaded.
+- **Errors:** an upload error stops the upload and shows on the page, but files uploaded before
+  it stay (`S3Testcase.py:33-35`). When deleting, S3 can fail on single files without raising an
+  error, and the code doesn't check for that (`S3Testcase.py:43-44`), so an old file could stay
+  behind.
+- **Old folders:** if a problem is deleted from the database and migrated again, it gets a new ID
+  and a new folder. The old folder is never deleted.
